@@ -1,0 +1,9 @@
+[package]
+name = "producer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rppal = { git = "https://github.com/golemparts/rppal", default-features = false, features = ["hal"] }
+embedded-hal = "1.0.0-alpha.7"
+anyhow = "1.0"

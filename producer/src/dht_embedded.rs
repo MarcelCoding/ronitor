@@ -1,33 +1,20 @@
 // https://github.com/kelnos/dht-embedded-rs: forked to fixed different dependency versions
+// https://cdn-shop.adafruit.com/datasheets/Digital+humidity+and+temperature+sensor+AM2302.pdf
 
 use core::fmt;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use rppal::gpio::{IoPin, Level};
-use spin_sleep::SpinSleeper;
+use rppal::gpio::{IoPin, Level, Mode};
 
-/// A sensor reading
-#[derive(Debug, Clone, Copy)]
-pub struct Reading {
-  humidity: f32,
-  temperature: f32,
-}
-
-impl Reading {
-  /// Returns the ambient humidity, as a percentage value from 0.0 to 100.0
-  pub fn humidity(&self) -> f32 {
-    self.humidity
-  }
-
-  /// Returns the ambient temperature, in degrees Celsius
-  pub fn temperature(&self) -> f32 {
-    self.temperature
-  }
+#[derive(Debug)]
+pub(crate) struct Reading {
+  pub(crate) humidity: f32,
+  pub(crate) temperature: f32,
 }
 
 /// A type detailing various errors the DHT sensor can return
 #[derive(Debug, Clone)]
-pub enum DhtError {
+pub(crate) enum DhtError {
   /// The DHT sensor was not found on the specified GPIO
   NotPresent,
   /// The checksum provided in the DHT sensor data did not match the checksum of the data itself (expected, calculated)
@@ -35,201 +22,153 @@ pub enum DhtError {
   /// The seemingly-valid data has impossible values (e.g. a humidity value less than 0 or greater than 100)
   InvalidData,
   /// The read timed out
-  Timeout,
+  TimeoutPost50us(usize),
+  TimeoutBit(usize),
 }
 
 impl fmt::Display for DhtError {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    use DhtError::*;
     match self {
-      NotPresent => write!(f, "DHT device not found"),
-      ChecksumMismatch(expected, calculated) => write!(
+      DhtError::NotPresent => write!(f, "DHT device not found"),
+      DhtError::ChecksumMismatch(expected, calculated) => write!(
         f,
-        "Data read was corrupt (expected checksum {:x}, calculated {:x})",
-        expected, calculated
+        "Data read was corrupt (expected checksum {expected:x}, calculated {calculated:x})",
       ),
-      InvalidData => f.write_str("Received data is out of range"),
-      Timeout => f.write_str("Timed out waiting for a read"),
+      DhtError::InvalidData => f.write_str("Received data is out of range"),
+      DhtError::TimeoutPost50us(bit) => write!(f, "Timed out waiting for a read: post 50us, {bit}"),
+      DhtError::TimeoutBit(bit) => write!(f, "Timed out waiting for a read: bit, {bit}"),
     }
   }
 }
 
-/// Trait that allows us to disable interrupts when reading from the sensor
-pub trait InterruptControl {
-  fn enable_interrupts(&mut self);
-  fn disable_interrupts(&mut self);
+fn sleep(duration: Duration) -> Instant {
+  let now = Instant::now();
+  while now.elapsed() < duration {}
+  now
 }
 
-/// A dummy implementation of InterruptControl that does nothing
-pub struct NoopInterruptControl;
-
-impl InterruptControl for NoopInterruptControl {
-  fn enable_interrupts(&mut self) {}
-  fn disable_interrupts(&mut self) {}
-}
-
-/// A trait for reading data from the sensor
-///
-/// This level of indirection is useful so you can write generic code that
-/// does not assume whether a DHT11 or DHT22 sensor is being used.
-pub trait DhtSensor {
-  /// Reads data from the sensor and returns a `Reading`
-  fn read(&mut self) -> Result<Reading, DhtError>;
-}
-
-#[doc(hidden)]
-pub struct Dht<ID: InterruptControl> {
-  interrupt_disabler: ID,
+pub(crate) struct Dht22 {
   pin: IoPin,
-  sleep: SpinSleeper,
 }
 
-impl<ID: InterruptControl> Dht<ID> {
-  fn new(interrupt_disabler: ID, pin: IoPin) -> Self {
-    Self {
-      interrupt_disabler,
-      pin,
-      sleep: SpinSleeper::default(),
-    }
+impl Dht22 {
+  pub fn new(pin: IoPin) -> Self {
+    Self { pin }
   }
 
-  fn read(&mut self, parse_data: fn(&[u8]) -> (f32, f32)) -> Result<Reading, DhtError> {
-    self.interrupt_disabler.disable_interrupts();
-    let res = self.read_uninterruptible(parse_data);
-    self.interrupt_disabler.enable_interrupts();
-    res
-  }
+  pub(crate) fn read(&mut self) -> Result<Reading, DhtError> {
+    // TODO: disable interrupts
 
-  fn read_uninterruptible(
-    &mut self,
-    parse_data: fn(&[u8]) -> (f32, f32),
-  ) -> Result<Reading, DhtError> {
     let mut buf: [u8; 5] = [0; 5];
 
-    // Wake up the sensor
-    self.pin.set_low();
-
-    self.sleep.sleep(Duration::from_micros(80));
-
-    // Ask for data
-    self.pin.set_high();
-    self.sleep.sleep(Duration::from_micros(25));
-
-    // Wait for DHT to signal data is ready (~80us low followed by ~80us high)
-    self.wait_for_level(Level::High, 85, DhtError::NotPresent)?;
-    self.wait_for_level(Level::Low, 85, DhtError::NotPresent)?;
+    self.wake_up()?;
 
     // Now read 40 data bits
     for bit in 0..40 {
-      // Wait ~50us for high
-      self.wait_for_level(Level::High, 55, DhtError::Timeout)?;
+      // Wait for high, which takes ~50us
+      self.wait_for_level(
+        Level::High,
+        Duration::from_micros(70),
+        DhtError::TimeoutPost50us(bit),
+      )?;
 
-      // See how long it takes to go low, with max of 70us
-      let elapsed = self.wait_for_level(Level::Low, 70, DhtError::Timeout)?;
+      // See how long it takes to go low, with max of 70us (+ ~50us from above)
+      let elapsed = self.wait_for_level(
+        Level::Low,
+        Duration::from_micros(90),
+        DhtError::TimeoutBit(bit),
+      )?;
+
       // If it took at least 30us to go low, it's a '1' bit
-      if elapsed > 30 {
+      if elapsed.as_micros() > 30 {
         let byte = bit / 8;
         let shift = 7 - bit % 8;
-        buf[byte] |= 1 << shift;
+        let mask = 1 << shift;
+        buf[byte] |= mask;
       }
     }
 
-    let checksum = (buf[0..=3]
-      .iter()
-      .fold(0u16, |accum, next| accum + *next as u16)
-      & 0xff) as u8;
-    if buf[4] == checksum {
-      let (humidity, temperature) = parse_data(&buf);
-      if !(0.0..=100.0).contains(&humidity) {
-        Err(DhtError::InvalidData)
-      } else {
-        Ok(Reading {
-          humidity,
-          temperature,
-        })
-      }
-    } else {
-      Err(DhtError::ChecksumMismatch(buf[4], checksum))
+    let checksum = Self::calc_checksum(&buf);
+
+    if buf[4] != checksum {
+      return Err(DhtError::ChecksumMismatch(buf[4], checksum));
     }
+
+    let (humidity, temperature) = Self::parse_data(&buf);
+
+    if !(0.0..=100.0).contains(&humidity) {
+      return Err(DhtError::InvalidData);
+    }
+
+    Ok(Reading {
+      humidity,
+      temperature,
+    })
+  }
+
+  fn wake_up(&mut self) -> Result<(), DhtError> {
+    // wake up
+    self.pin.set_mode(Mode::Output);
+    self.pin.set_high();
+
+    sleep(Duration::from_millis(100));
+
+    // Ask for data
+    self.pin.set_low();
+
+    sleep(Duration::from_millis(5));
+
+    self.pin.set_high();
+
+    self.pin.set_mode(Mode::Input);
+
+    // Wait for DHT to signal data is ready (~80us low followed by ~80us high)
+    self.wait_for_level(Level::Low, Duration::from_micros(45), DhtError::NotPresent)?;
+    self.wait_for_level(Level::High, Duration::from_micros(85), DhtError::NotPresent)?;
+    self.wait_for_level(Level::Low, Duration::from_micros(85), DhtError::NotPresent)?;
+
+    Ok(())
   }
 
   fn wait_for_level(
     &mut self,
     level: Level,
-    timeout_us: u32,
+    timeout: Duration,
     on_timeout: DhtError,
-  ) -> Result<u32, DhtError> {
-    let tester = || match level {
-      Level::High => self.pin.is_high(),
-      Level::Low => self.pin.is_low(),
-    };
+  ) -> Result<Duration, DhtError> {
+    let start = Instant::now();
 
-    for elapsed in 0..=timeout_us {
-      if tester() {
-        return Ok(elapsed);
+    while self.pin.read() != level {
+      if start.elapsed() > timeout {
+        return Err(on_timeout);
       }
-      self.sleep.sleep(Duration::from_micros(1));
+      sleep(Duration::from_micros(1));
     }
-    Err(on_timeout)
+
+    Ok(start.elapsed())
   }
-}
 
-/// A DHT11 sensor
-// pub struct Dht11<
-//   HE,
-//   ID: InterruptControl,
-//   D: DelayUs,
-//   P: InputPin<Error=HE> + OutputPin<Error=HE>,
-// > {
-//   dht: Dht<HE, ID, D, P>,
-// }
-//
-// impl<HE, ID: InterruptControl, D: DelayUs, P: InputPin<Error=HE> + OutputPin<Error=HE>>
-// Dht11<HE, ID, D, P>
-// {
-//   pub fn new(interrupt_disabler: ID, delay: D, pin: P) -> Self {
-//     Self {
-//       dht: Dht::new(interrupt_disabler, delay, pin),
-//     }
-//   }
-//
-//   fn parse_data(buf: &[u8]) -> (f32, f32) {
-//     (buf[0] as f32, buf[2] as f32)
-//   }
-// }
-//
-// impl<HE, ID: InterruptControl, D: DelayUs, P: InputPin<Error=HE> + OutputPin<Error=HE>>
-// DhtSensor<HE> for Dht11<HE, ID, D, P>
-// {
-//   fn read(&mut self) -> Result<Reading, DhtError<HE>> {
-//     self.dht.read(Dht11::<HE, ID, D, P>::parse_data)
-//   }
-// }
-
-/// A DHT22 sensor
-pub struct Dht22<ID: InterruptControl> {
-  dht: Dht<ID>,
-}
-
-impl<ID: InterruptControl> Dht22<ID> {
-  pub fn new(interrupt_disabler: ID, pin: IoPin) -> Self {
-    Self {
-      dht: Dht::new(interrupt_disabler, pin),
-    }
+  fn calc_checksum(buf: &[u8; 5]) -> u8 {
+    (buf[0..=3]
+      .iter()
+      .fold(0u16, |accum, next| accum + *next as u16)
+      & 0xff) as u8
   }
 
   fn parse_data(buf: &[u8]) -> (f32, f32) {
-    let humidity = (((buf[0] as u16) << 8) | buf[1] as u16) as f32 / 10.0;
-    let mut temperature = ((((buf[2] & 0x7f) as u16) << 8) | buf[3] as u16) as f32 / 10.0;
+    let humidity0 = (buf[0] as u16) << 8;
+    let humidity1 = buf[1] as u16;
+    let temperature0 = ((buf[2] & 0x7f) as u16) << 8; // 0x7f bit mask: exclude signing bit
+    let temperature1 = buf[3] as u16;
+
+    let humidity = (humidity0 | humidity1) as f32 / 10.0;
+    let mut temperature = (temperature0 | temperature1) as f32 / 10.0;
+
+    // signing bit
     if buf[2] & 0x80 != 0 {
       temperature = -temperature;
     }
-    (humidity, temperature)
-  }
-}
 
-impl<ID: InterruptControl> DhtSensor for Dht22<ID> {
-  fn read(&mut self) -> Result<Reading, DhtError> {
-    self.dht.read(Dht22::<ID>::parse_data)
+    (humidity, temperature)
   }
 }

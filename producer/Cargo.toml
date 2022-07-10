@@ -4,6 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rppal = { git = "https://github.com/golemparts/rppal", default-features = false }
-spin_sleep = "1.1"
+rppal = { git = "https://github.com/golemparts/rppal.git", default-features = false }
 anyhow = "1.0"

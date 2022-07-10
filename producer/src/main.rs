@@ -5,9 +5,7 @@ use std::{env, thread};
 
 use rppal::gpio::{Gpio, Mode};
 
-use dht_embedded::{Dht22, NoopInterruptControl};
-
-use crate::dht_embedded::DhtSensor;
+use dht_embedded::Dht22;
 
 mod dht_embedded;
 
@@ -18,13 +16,13 @@ fn main() -> anyhow::Result<()> {
     panic!("Missing pin number");
   };
 
-  let pin = Gpio::new()?.get(pin_nbr)?.into_io(Mode::Output);
+  let pin = Gpio::new()?.get(pin_nbr)?.into_io(Mode::Input);
 
-  let mut sensor = Dht22::new(NoopInterruptControl, pin);
+  let mut sensor = Dht22::new(pin);
 
   loop {
     match sensor.read() {
-      Ok(reading) => println!("{}°C, {}% RH", reading.temperature(), reading.humidity()),
+      Ok(reading) => println!("{}°C, {}% RH", reading.temperature, reading.humidity),
       Err(e) => eprintln!("Error: {}", e),
     }
 

@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rppal = { git = "https://github.com/golemparts/rppal", default-features = false, features = ["hal"] }
-embedded-hal = "1.0.0-alpha.7"
+rppal = { git = "https://github.com/golemparts/rppal", default-features = false }
+spin_sleep = "1.1"
 anyhow = "1.0"

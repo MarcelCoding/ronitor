@@ -1,14 +1,10 @@
 // https://github.com/kelnos/dht-embedded-rs: forked to fixed different dependency versions
 
 use core::fmt;
+use std::time::Duration;
 
-use embedded_hal::{
-  delay::blocking::DelayUs,
-  digital::{
-    blocking::{InputPin, OutputPin},
-    PinState,
-  },
-};
+use rppal::gpio::{IoPin, Level};
+use spin_sleep::SpinSleeper;
 
 /// A sensor reading
 #[derive(Debug, Clone, Copy)]
@@ -31,7 +27,7 @@ impl Reading {
 
 /// A type detailing various errors the DHT sensor can return
 #[derive(Debug, Clone)]
-pub enum DhtError<HE> {
+pub enum DhtError {
   /// The DHT sensor was not found on the specified GPIO
   NotPresent,
   /// The checksum provided in the DHT sensor data did not match the checksum of the data itself (expected, calculated)
@@ -40,19 +36,9 @@ pub enum DhtError<HE> {
   InvalidData,
   /// The read timed out
   Timeout,
-  /// Received a low-level error from the HAL while sleeping
-  DelayError,
-  /// Received a low-level error from the HAL while reading or writing to pins
-  PinError(HE),
 }
 
-impl<HE> From<HE> for DhtError<HE> {
-  fn from(error: HE) -> Self {
-    DhtError::PinError(error)
-  }
-}
-
-impl<HE: fmt::Debug> fmt::Display for DhtError<HE> {
+impl fmt::Display for DhtError {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     use DhtError::*;
     match self {
@@ -64,14 +50,9 @@ impl<HE: fmt::Debug> fmt::Display for DhtError<HE> {
       ),
       InvalidData => f.write_str("Received data is out of range"),
       Timeout => f.write_str("Timed out waiting for a read"),
-      DelayError => f.write_str("Failed to sleep"),
-      PinError(err) => write!(f, "HAL pin error: {:?}", err),
     }
   }
 }
-
-#[cfg(feature = "std")]
-impl<HE: fmt::Debug> std::error::Error for DhtError<HE> {}
 
 /// Trait that allows us to disable interrupts when reading from the sensor
 pub trait InterruptControl {
@@ -91,35 +72,28 @@ impl InterruptControl for NoopInterruptControl {
 ///
 /// This level of indirection is useful so you can write generic code that
 /// does not assume whether a DHT11 or DHT22 sensor is being used.
-pub trait DhtSensor<HE> {
+pub trait DhtSensor {
   /// Reads data from the sensor and returns a `Reading`
-  fn read(&mut self) -> Result<Reading, DhtError<HE>>;
+  fn read(&mut self) -> Result<Reading, DhtError>;
 }
 
 #[doc(hidden)]
-pub struct Dht<
-  HE,
-  ID: InterruptControl,
-  D: DelayUs,
-  P: InputPin<Error=HE> + OutputPin<Error=HE>,
-> {
+pub struct Dht<ID: InterruptControl> {
   interrupt_disabler: ID,
-  delay: D,
-  pin: P,
+  pin: IoPin,
+  sleep: SpinSleeper,
 }
 
-impl<HE, ID: InterruptControl, D: DelayUs, P: InputPin<Error=HE> + OutputPin<Error=HE>>
-Dht<HE, ID, D, P>
-{
-  fn new(interrupt_disabler: ID, delay: D, pin: P) -> Self {
+impl<ID: InterruptControl> Dht<ID> {
+  fn new(interrupt_disabler: ID, pin: IoPin) -> Self {
     Self {
       interrupt_disabler,
-      delay,
       pin,
+      sleep: SpinSleeper::default(),
     }
   }
 
-  fn read(&mut self, parse_data: fn(&[u8]) -> (f32, f32)) -> Result<Reading, DhtError<HE>> {
+  fn read(&mut self, parse_data: fn(&[u8]) -> (f32, f32)) -> Result<Reading, DhtError> {
     self.interrupt_disabler.disable_interrupts();
     let res = self.read_uninterruptible(parse_data);
     self.interrupt_disabler.enable_interrupts();
@@ -129,31 +103,29 @@ Dht<HE, ID, D, P>
   fn read_uninterruptible(
     &mut self,
     parse_data: fn(&[u8]) -> (f32, f32),
-  ) -> Result<Reading, DhtError<HE>> {
+  ) -> Result<Reading, DhtError> {
     let mut buf: [u8; 5] = [0; 5];
 
     // Wake up the sensor
-    self.pin.set_low()?;
-    self
-      .delay
-      .delay_us(3000)
-      .map_err(|_| DhtError::DelayError)?;
+    self.pin.set_low();
+
+    self.sleep.sleep(Duration::from_micros(80));
 
     // Ask for data
-    self.pin.set_high()?;
-    self.delay.delay_us(25).map_err(|_| DhtError::DelayError)?;
+    self.pin.set_high();
+    self.sleep.sleep(Duration::from_micros(25));
 
     // Wait for DHT to signal data is ready (~80us low followed by ~80us high)
-    self.wait_for_level(PinState::High, 85, DhtError::NotPresent)?;
-    self.wait_for_level(PinState::Low, 85, DhtError::NotPresent)?;
+    self.wait_for_level(Level::High, 85, DhtError::NotPresent)?;
+    self.wait_for_level(Level::Low, 85, DhtError::NotPresent)?;
 
     // Now read 40 data bits
     for bit in 0..40 {
       // Wait ~50us for high
-      self.wait_for_level(PinState::High, 55, DhtError::Timeout)?;
+      self.wait_for_level(Level::High, 55, DhtError::Timeout)?;
 
       // See how long it takes to go low, with max of 70us
-      let elapsed = self.wait_for_level(PinState::Low, 70, DhtError::Timeout)?;
+      let elapsed = self.wait_for_level(Level::Low, 70, DhtError::Timeout)?;
       // If it took at least 30us to go low, it's a '1' bit
       if elapsed > 30 {
         let byte = bit / 8;
@@ -183,22 +155,20 @@ Dht<HE, ID, D, P>
 
   fn wait_for_level(
     &mut self,
-    level: PinState,
+    level: Level,
     timeout_us: u32,
-    on_timeout: DhtError<HE>,
-  ) -> Result<u32, DhtError<HE>> {
+    on_timeout: DhtError,
+  ) -> Result<u32, DhtError> {
     let tester = || match level {
-      PinState::High => self.pin.is_high(),
-      PinState::Low => self.pin.is_low(),
+      Level::High => self.pin.is_high(),
+      Level::Low => self.pin.is_low(),
     };
 
     for elapsed in 0..=timeout_us {
-      if tester()? {
+      if tester() {
         return Ok(elapsed);
       }
-      if self.delay.delay_us(1).is_err() {
-        return Err(DhtError::DelayError);
-      }
+      self.sleep.sleep(Duration::from_micros(1));
     }
     Err(on_timeout)
   }
@@ -237,21 +207,14 @@ Dht<HE, ID, D, P>
 // }
 
 /// A DHT22 sensor
-pub struct Dht22<
-  HE,
-  ID: InterruptControl,
-  D: DelayUs,
-  P: InputPin<Error=HE> + OutputPin<Error=HE>,
-> {
-  dht: Dht<HE, ID, D, P>,
+pub struct Dht22<ID: InterruptControl> {
+  dht: Dht<ID>,
 }
 
-impl<HE, ID: InterruptControl, D: DelayUs, P: InputPin<Error=HE> + OutputPin<Error=HE>>
-Dht22<HE, ID, D, P>
-{
-  pub fn new(interrupt_disabler: ID, delay: D, pin: P) -> Self {
+impl<ID: InterruptControl> Dht22<ID> {
+  pub fn new(interrupt_disabler: ID, pin: IoPin) -> Self {
     Self {
-      dht: Dht::new(interrupt_disabler, delay, pin),
+      dht: Dht::new(interrupt_disabler, pin),
     }
   }
 
@@ -265,10 +228,8 @@ Dht22<HE, ID, D, P>
   }
 }
 
-impl<HE, ID: InterruptControl, D: DelayUs, P: InputPin<Error=HE> + OutputPin<Error=HE>>
-DhtSensor<HE> for Dht22<HE, ID, D, P>
-{
-  fn read(&mut self) -> Result<Reading, DhtError<HE>> {
-    self.dht.read(Dht22::<HE, ID, D, P>::parse_data)
+impl<ID: InterruptControl> DhtSensor for Dht22<ID> {
+  fn read(&mut self) -> Result<Reading, DhtError> {
+    self.dht.read(Dht22::<ID>::parse_data)
   }
 }

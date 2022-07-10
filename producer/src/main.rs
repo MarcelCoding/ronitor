@@ -1,10 +1,9 @@
 extern crate core;
 
-use std::{env, thread};
 use std::time::Duration;
+use std::{env, thread};
 
 use rppal::gpio::{Gpio, Mode};
-use rppal::hal::Delay;
 
 use dht_embedded::{Dht22, NoopInterruptControl};
 
@@ -21,7 +20,7 @@ fn main() -> anyhow::Result<()> {
 
   let pin = Gpio::new()?.get(pin_nbr)?.into_io(Mode::Output);
 
-  let mut sensor = Dht22::new(NoopInterruptControl, Delay, pin);
+  let mut sensor = Dht22::new(NoopInterruptControl, pin);
 
   loop {
     match sensor.read() {

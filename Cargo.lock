@@ -25,7 +25,7 @@ dependencies = [
 [[package]]
 name = "rppal"
 version = "0.13.1"
-source = "git+https://github.com/golemparts/rppal.git#54e54cbe17293044eaf77bc599631c0ecc572f91"
+source = "git+https://github.com/golemparts/rppal.git#af283afe1234c2af6a2e4bba407287fec29072df"
 dependencies = [
  "libc",
 ]

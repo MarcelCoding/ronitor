@@ -1,8 +1,8 @@
 extern crate core;
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader};
 use std::io::Write;
+use std::io::{BufRead, BufReader};
 
 use anyhow::anyhow;
 use reqwest::Client;
@@ -48,42 +48,60 @@ async fn main() -> anyhow::Result<()> {
     let pin = Gpio::new()?.get(sensor.pin)?.into_io(Mode::Input);
     let mut dht22 = Dht22::new(pin);
 
-    match dht22.read() {
-      Ok(reading) => {
-        data.push((
-          sensor.humidity_id,
-          SensorData {
-            timestamp: now,
-            value: reading.humidity,
-          },
-        ));
-        data.push((
-          sensor.temperature_id,
-          SensorData {
-            timestamp: now,
-            value: reading.temperature,
-          },
-        ));
+    let mut errors = 0;
+
+    while errors < 3 {
+      match dht22.read() {
+        Ok(reading) => {
+          data.push((
+            sensor.humidity_id,
+            SensorData {
+              timestamp: now,
+              value: reading.humidity,
+            },
+          ));
+          data.push((
+            sensor.temperature_id,
+            SensorData {
+              timestamp: now,
+              value: reading.temperature,
+            },
+          ));
+          errors = 10;
+        }
+        Err(e) => {
+          eprintln!(
+            "{}/{}: Error: {}",
+            sensor.humidity_id, sensor.temperature_id, e
+          );
+          errors += 1;
+        }
       }
-      Err(e) => eprintln!(
-        "{}/{}: Error: {}",
-        sensor.humidity_id, sensor.temperature_id, e
-      ),
     }
   }
 
   for sensor in &config.ds18b22 {
     let ds18b220 = Ds18b20::new(&sensor.device_id);
 
-    match ds18b220.read() {
-      Ok(temperature) => data.push((
-        sensor.temperature_id,
-        SensorData {
-          timestamp: now,
-          value: temperature,
-        },
-      )),
-      Err(e) => eprintln!("{}: Error: {}", sensor.temperature_id, e),
+    let mut errors = 0;
+
+    while errors < 3 {
+      match ds18b220.read() {
+        Ok(temperature) => {
+          data.push((
+            sensor.temperature_id,
+            SensorData {
+              timestamp: now,
+              value: temperature,
+            },
+          ));
+          errors = 10;
+        }
+        Err(e) => {
+          eprintln!("{}: Error: {}", sensor.temperature_id, e);
+          errors += 1;
+        }
+      }
     }
   }
 
@@ -138,10 +156,7 @@ fn write_to_cache(
   path: &str,
   entries: Vec<(Uuid, SensorData)>,
 ) -> anyhow::Result<()> {
-  let mut file = OpenOptions::new()
-    .write(true)
-    .append(true)
-    .open(path)?;
+  let mut file = OpenOptions::new().write(true).append(true).open(path)?;
 
   if overwrite {
     file.set_len(0)?;

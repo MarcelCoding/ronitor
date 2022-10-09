@@ -1,0 +1,36 @@
+dht22:
+  # haus unten
+  - pin: 17
+    temperature_id: fcc9ed1e-18cd-4dcf-b9c3-b4ca07c57e03
+    humidity_id: 657b8965-b959-4a9a-b13d-945c0b36bf25
+
+  # draußen
+  - pin: 27
+    temperature_id: 8c754b87-f9ad-494d-ad2b-f94446d9856b
+    humidity_id: 9b778bb5-69b7-408f-871b-b454249b9a4d
+
+  # rpi
+  - pin: 22
+    temperature_id: 9350f8ab-a7ec-4ec1-82a9-1595adf7afc2
+    humidity_id: 81636f5b-03c8-4572-987d-2361aad9dcf3
+
+ds18b22:
+  # haus mitte
+  - device_id: 28-0317018cd6ff
+    temperature_id: 955b710f-a51c-4156-90e9-cb2c4acea14a
+
+  # first
+  - device_id: 28-041701d41eff
+    temperature_id: eb4a73c3-4d73-4379-9db6-77b008ef7d1b
+
+  # boden
+  - device_id: 28-041701e749ff
+    temperature_id: 68afbf3f-d083-4748-b46a-56c140c74722
+
+  # ventilator
+  - device_id: 28-031701f66bff
+    temperature_id: d47015c0-e434-4751-937e-5a8aa5c1444d
+
+  # mitte
+  - device_id: 28-041701b507ff
+    temperature_id: f311cb4e-8c51-4125-888f-11821142fa33

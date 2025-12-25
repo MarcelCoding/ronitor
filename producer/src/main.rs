@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
 
   let config: Config = {
     let file = File::open(&args[1])?;
-    serde_yaml::from_reader(file)?
+    serde_yaml_ng::from_reader(file)?
   };
 
   let mut data = Vec::new();
@@ -156,7 +156,7 @@ fn write_to_cache(
   path: &str,
   entries: Vec<(Uuid, SensorData)>,
 ) -> anyhow::Result<()> {
-  let mut file = OpenOptions::new().write(true).append(true).open(path)?;
+  let mut file = OpenOptions::new().append(true).open(path)?;
 
   if overwrite {
     file.set_len(0)?;

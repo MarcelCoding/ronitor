@@ -73,7 +73,7 @@ jobs:
       - name: Rename binary
         run: mv target/${{ matrix.target }}/release/${{ matrix.module }} ronitor_${{ matrix.module }}_${{ matrix.target }}
 
-      - uses: actions/upload-artifact@v2
+      - uses: actions/upload-artifact@v6
         with:
           name: ronitor_${{ matrix.module }}_${{ matrix.target }}
           path: ronitor_${{ matrix.module }}_${{ matrix.target }}

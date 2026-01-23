@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 rppal = { git = "https://github.com/golemparts/rppal.git", rev = "af283afe", default-features = false }
-tokio = { version = "1.48", default-features = false, features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.49", default-features = false, features = ["macros", "rt-multi-thread"] }
 time = { version = "0.3", features = ["serde-well-known"] }
 serde = { version = "1.0", features = ["derive"] }
 uuid = { version = "1.19", features = ["serde"] }
